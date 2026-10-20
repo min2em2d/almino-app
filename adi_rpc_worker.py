@@ -32,11 +32,9 @@ _vault_restored = False
 _vault_lock = threading.Lock()
 
 
-def _cloud_restore_if_needed(db_path: str):
-    global _vault_restored
-    if _vault_restored or not HF_TOKEN:
+def _merge_remote_into_local(db_path: str):
+    if not HF_TOKEN:
         return
-    _vault_restored = True
     try:
         from huggingface_hub import hf_hub_download
         remote_db = hf_hub_download(
@@ -44,25 +42,33 @@ def _cloud_restore_if_needed(db_path: str):
             filename="mac_auth_system.db",
             repo_type="dataset",
             token=HF_TOKEN,
+            force_download=True,
         )
         if remote_db and os.path.exists(remote_db):
             if not os.path.exists(db_path):
                 shutil.copy2(remote_db, db_path)
             else:
-                # Merge any rows from remote_db into local db_path
                 conn = sqlite3.connect(db_path, timeout=30)
                 _ensure_db_schema(conn)
                 conn.execute("ATTACH DATABASE ? AS rem", (remote_db,))
                 conn.execute("INSERT OR IGNORE INTO main.devices SELECT * FROM rem.devices")
                 try:
-                    conn.execute("INSERT OR REPLACE INTO main.users SELECT * FROM rem.users")
+                    conn.execute("INSERT OR IGNORE INTO main.users SELECT * FROM rem.users")
                 except Exception:
                     pass
                 conn.commit()
                 conn.execute("DETACH DATABASE rem")
                 conn.close()
     except Exception as e:
-        sys.stderr.write(f"[Vault Restore Notice] {e}\n")
+        sys.stderr.write(f"[Vault Merge Notice] {e}\n")
+
+
+def _cloud_restore_if_needed(db_path: str):
+    global _vault_restored
+    if _vault_restored or not HF_TOKEN:
+        return
+    _vault_restored = True
+    _merge_remote_into_local(db_path)
 
 
 def _cloud_backup_async(db_path: str):
@@ -72,6 +78,7 @@ def _cloud_backup_async(db_path: str):
     def _upload():
         with _vault_lock:
             try:
+                _merge_remote_into_local(db_path)
                 from huggingface_hub import HfApi
                 api = HfApi(token=HF_TOKEN)
                 api.create_repo(repo_id=HF_VAULT_REPO, repo_type="dataset", private=True, exist_ok=True)
