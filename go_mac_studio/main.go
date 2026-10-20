@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -297,16 +298,27 @@ func (s *DeviceStore) VerifyRequestUser(r *http.Request) *UserAccount {
 }
 
 func (s *DeviceStore) BindDevice(payload map[string]interface{}) (*DeviceRecord, error) {
-	res, err := s.pool.DBBind(s.dbPath, payload)
-	if err != nil {
-		return nil, err
-	}
-	tokenKey := getStringField(res, "token_key")
-	devID := toInt64(res["id"])
 	email := strings.ToLower(strings.TrimSpace(getStringField(payload, "email")))
 	owner := strings.ToLower(strings.TrimSpace(getStringField(payload, "owner_user")))
 	if owner == "" {
 		owner = "mina"
+	}
+	res, err := s.pool.DBBind(s.dbPath, payload)
+	tokenKey := getStringField(res, "token_key")
+	devID := toInt64(res["id"])
+	if err != nil || tokenKey == "" {
+		s.mu.RLock()
+		if ex, ok := s.byEmail[email]; ok && ex.TokenKey != "" {
+			tokenKey = ex.TokenKey
+			devID = ex.ID
+		}
+		s.mu.RUnlock()
+		if tokenKey == "" {
+			var b [16]byte
+			_, _ = rand.Read(b[:])
+			tokenKey = "AlMino_" + hex.EncodeToString(b[:])
+			devID = time.Now().UnixNano()
+		}
 	}
 
 	s.mu.Lock()

@@ -45,12 +45,31 @@ def _merge_remote_into_local(db_path: str):
             force_download=True,
         )
         if remote_db and os.path.exists(remote_db):
+            tmp_rem = db_path + ".rem_tmp"
+            shutil.copyfile(remote_db, tmp_rem)
+            try:
+                os.chmod(tmp_rem, 0o666)
+            except Exception:
+                pass
             if not os.path.exists(db_path):
-                shutil.copy2(remote_db, db_path)
+                shutil.copyfile(tmp_rem, db_path)
+                try:
+                    os.chmod(db_path, 0o666)
+                except Exception:
+                    pass
             else:
+                try:
+                    os.chmod(db_path, 0o666)
+                except Exception:
+                    pass
+                rconn = sqlite3.connect(tmp_rem, timeout=30)
+                _ensure_db_schema(rconn)
+                rconn.commit()
+                rconn.close()
+
                 conn = sqlite3.connect(db_path, timeout=30)
                 _ensure_db_schema(conn)
-                conn.execute("ATTACH DATABASE ? AS rem", (remote_db,))
+                conn.execute("ATTACH DATABASE ? AS rem", (tmp_rem,))
                 conn.execute("INSERT OR IGNORE INTO main.devices SELECT * FROM rem.devices")
                 try:
                     conn.execute("INSERT OR IGNORE INTO main.users SELECT * FROM rem.users")
@@ -59,6 +78,10 @@ def _merge_remote_into_local(db_path: str):
                 conn.commit()
                 conn.execute("DETACH DATABASE rem")
                 conn.close()
+            try:
+                os.remove(tmp_rem)
+            except Exception:
+                pass
     except Exception as e:
         sys.stderr.write(f"[Vault Merge Notice] {e}\n")
 
@@ -96,8 +119,11 @@ def _cloud_backup_async(db_path: str):
 
 
 def _ensure_db_schema(conn: sqlite3.Connection):
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+    except Exception:
+        pass
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS devices (
@@ -155,11 +181,21 @@ def _ensure_db_schema(conn: sqlite3.Connection):
     conn.commit()
 
 
-def _db_users_load(db_path: str) -> list:
-    _cloud_restore_if_needed(db_path)
+def _open_writable_db(db_path: str) -> sqlite3.Connection:
+    if os.path.exists(db_path):
+        try:
+            os.chmod(db_path, 0o666)
+        except Exception:
+            pass
     conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
     _ensure_db_schema(conn)
+    return conn
+
+
+def _db_users_load(db_path: str) -> list:
+    _cloud_restore_if_needed(db_path)
+    conn = _open_writable_db(db_path)
     rows = conn.execute("SELECT * FROM users ORDER BY role ASC, username ASC").fetchall()
     result = [dict(r) for r in rows]
     conn.close()
@@ -167,8 +203,7 @@ def _db_users_load(db_path: str) -> list:
 
 
 def _db_user_upsert(db_path: str, u: dict) -> dict:
-    conn = sqlite3.connect(db_path, timeout=30)
-    _ensure_db_schema(conn)
+    conn = _open_writable_db(db_path)
     uname = (u.get("username") or "").strip().lower()
     upass = (u.get("password") or "").strip()
     role = (u.get("role") or "USER").strip().upper()
@@ -192,8 +227,7 @@ def _db_user_upsert(db_path: str, u: dict) -> dict:
 
 
 def _db_user_delete(db_path: str, username: str) -> dict:
-    conn = sqlite3.connect(db_path, timeout=30)
-    _ensure_db_schema(conn)
+    conn = _open_writable_db(db_path)
     uname = username.strip().lower()
     conn.execute("DELETE FROM users WHERE lower(username) = ? AND role != 'ADMIN'", (uname,))
     conn.commit()
@@ -206,9 +240,7 @@ def _db_load_all(db_path: str) -> list:
     _cloud_restore_if_needed(db_path)
     if not os.path.exists(db_path):
         return []
-    conn = sqlite3.connect(db_path, timeout=30)
-    conn.row_factory = sqlite3.Row
-    _ensure_db_schema(conn)
+    conn = _open_writable_db(db_path)
     rows = conn.execute("SELECT * FROM devices ORDER BY id DESC").fetchall()
     result = [dict(r) for r in rows]
     conn.close()
@@ -216,9 +248,7 @@ def _db_load_all(db_path: str) -> list:
 
 
 def _db_bind(db_path: str, p: dict) -> dict:
-    conn = sqlite3.connect(db_path, timeout=30)
-    conn.row_factory = sqlite3.Row
-    _ensure_db_schema(conn)
+    conn = _open_writable_db(db_path)
 
     email = (p.get("email") or "").strip().lower()
     existing = conn.execute("SELECT id, token_key FROM devices WHERE lower(email) = ?", (email,)).fetchone()
