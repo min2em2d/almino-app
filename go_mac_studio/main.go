@@ -536,6 +536,20 @@ func main() {
 	addr := fmt.Sprintf("0.0.0.0:%d", *port)
 	fmt.Printf(" [+] Server listening on http://127.0.0.1:%d (and all network interfaces)\n", *port)
 	fmt.Printf("========================================================================\n")
+
+	// Background Keep-Alive Goroutine so cloud instance stays warm 24/7
+	go func() {
+		client := &http.Client{Timeout: 10 * time.Second}
+		for {
+			time.Sleep(10 * time.Minute)
+			extURL := os.Getenv("RENDER_EXTERNAL_URL")
+			if extURL == "" {
+				extURL = "https://almino-app.onrender.com"
+			}
+			_, _ = client.Get(strings.TrimRight(extURL, "/") + "/api/v1/devices")
+		}
+	}()
+
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		fmt.Printf(" [!] HTTP server error: %v\n", err)
 		os.Exit(1)
