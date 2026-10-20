@@ -436,15 +436,10 @@ func (s *DeviceStore) ResolveLiveCode(rec *DeviceRecord) (code string, rem int, 
 }
 
 func requestBaseURL(r *http.Request) string {
-	scheme := "http"
-	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") || strings.Contains(r.Host, "onrender.com") || strings.Contains(r.Host, "al-mino.site") {
-		scheme = "https"
+	if custom := strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")); custom != "" {
+		return strings.TrimRight(custom, "/")
 	}
-	host := r.Host
-	if host == "" {
-		host = "127.0.0.1:8820"
-	}
-	return fmt.Sprintf("%s://%s", scheme, host)
+	return fmt.Sprintf("https://%s:%d", BoreServerIP, BorePublicPort)
 }
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
@@ -465,6 +460,7 @@ func main() {
 	workers := flag.Int("workers", 4, "Number of parallel ADI Unicorn worker processes")
 	prewarm := flag.Int("prewarm", 5, "Number of pre-provisioned virtual MacBook Pros to keep ready in RAM")
 	pythonCmd := flag.String("python", "python", "Python executable for ADI Unicorn RPC workers")
+	enableBore := flag.Bool("bore", os.Getenv("PORT") != "", "Enable Bore public IP:8188 tunnel")
 	flag.Parse()
 
 	exePath, _ := os.Executable()
@@ -515,7 +511,7 @@ func main() {
 				StatusHex:  "#3fb950",
 				SMSCode:    "-",
 				LiveCode:   "...",
-				GetCodeURL: fmt.Sprintf("http://127.0.0.1:%d/api/free/v4/getcode?id=%s", *port, rec.TokenKey),
+				GetCodeURL: fmt.Sprintf("https://%s:%d/api/free/v4/getcode?id=%s", BoreServerIP, BorePublicPort, rec.TokenKey),
 				TokenKey:   rec.TokenKey,
 				PbB64:      rec.AdiPbB64,
 				HostUUID:   rec.HostUUID,
@@ -526,6 +522,10 @@ func main() {
 	}
 	store.mu.RUnlock()
 	linker.AppendLog(fmt.Sprintf("[+] Go Engine Ready! Loaded %d linked MacBook Pro account(s) from vault.", loadedCount))
+	if *enableBore {
+		StartBoreIPPortTunnel(*port, BorePublicPort, linker)
+		linker.AppendLog(fmt.Sprintf("[+] Public IP Tunnel Active: https://%s:%d/api/free/v4/getcode?id=...", BoreServerIP, BorePublicPort))
+	}
 
 	mux := http.NewServeMux()
 
