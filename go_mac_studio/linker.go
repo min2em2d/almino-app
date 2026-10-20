@@ -193,6 +193,7 @@ func gsaPost(pool *AdiEnginePool, client *http.Client, params map[string]interfa
 }
 
 func runSRPLogin(pool *AdiEnginePool, client *http.Client, email, password string, dev *VirtualMacDevice, svct string) (map[string]interface{}, map[string]interface{}, map[string]interface{}) {
+	email = strings.ToLower(strings.TrimSpace(email))
 	var lastInit map[string]interface{}
 	var lastCPD map[string]interface{}
 
@@ -844,7 +845,7 @@ func (m *LinkerManager) updateJob(j *AccountJob, status, colorHex string) {
 }
 
 func (m *LinkerManager) processSingleAccount(j *AccountJob, smsTimeoutSec int, baseURL string) {
-	email := strings.TrimSpace(j.Email)
+	email := strings.ToLower(strings.TrimSpace(j.Email))
 	password := strings.TrimSpace(j.Password)
 	otpURL := strings.TrimSpace(j.OTPUrl)
 	manualCode := strings.TrimSpace(j.ManualCode)

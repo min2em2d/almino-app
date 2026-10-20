@@ -116,6 +116,7 @@ type SRPUser struct {
 }
 
 func NewSRPUser(username string) (*SRPUser, []byte, error) {
+	username = strings.ToLower(strings.TrimSpace(username))
 	randBytes := make([]byte, 256)
 	if _, err := rand.Read(randBytes); err != nil {
 		return nil, nil, err
