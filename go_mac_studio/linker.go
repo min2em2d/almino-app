@@ -957,6 +957,26 @@ func (m *LinkerManager) processSingleAccount(j *AccountJob, smsTimeoutSec int, b
 		usedSMS := (au == "secondaryAuth")
 		valOK := false
 
+		if codeToUse == "" && otpURL != "" && strings.Contains(strings.ToLower(otpURL), "getcode") {
+			if req, err := http.NewRequest("GET", otpURL, nil); err == nil {
+				req.Header.Set("User-Agent", "curl/8.0")
+				if resp, err := sessClient.Do(req); err == nil {
+					b, _ := io.ReadAll(resp.Body)
+					resp.Body.Close()
+					codes := extractCodesFromSMSText(string(b))
+					if len(codes) > 0 {
+						cand := codes[len(codes)-1]
+						if validate2FACode(m.pool, sessClient, cand, spdDict, dev, cpd, false, 1) {
+							codeToUse = cand
+							usedSMS = false
+							valOK = true
+							m.AppendLog(fmt.Sprintf("[%s] Validated live 2FA getcode: %s", email, cand))
+						}
+					}
+				}
+			}
+		}
+
 		if codeToUse == "" && otpURL != "" {
 			m.updateJob(j, "Sending 2FA SMS...", "#d29922")
 			_ = triggerSMS2FA(m.pool, sessClient, spdDict, dev, cpd, 1, false)
