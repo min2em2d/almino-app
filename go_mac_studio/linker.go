@@ -1141,7 +1141,7 @@ func (m *LinkerManager) processSingleAccount(j *AccountJob, smsTimeoutSec int, b
 	}
 	m.store.DeductCredit(ownerUser)
 
-	getCodeURL := fmt.Sprintf("%s/getcode/%s", strings.TrimRight(baseURL, "/"), rec.TokenKey)
+	getCodeURL := fmt.Sprintf("%s/api/free/v4/getcode?id=%s", strings.TrimRight(baseURL, "/"), rec.TokenKey)
 	m.mu.Lock()
 	j.Status = "✅ LINKED (MacBook Pro)"
 	j.StatusHex = "#3fb950"

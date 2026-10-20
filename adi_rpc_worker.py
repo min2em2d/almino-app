@@ -17,6 +17,7 @@ import uuid
 import base64
 import shutil
 import sqlite3
+import hashlib
 import threading
 
 # Redirect any accidental print() calls inside adi_win_engine to stderr
@@ -242,9 +243,33 @@ def _db_load_all(db_path: str) -> list:
         return []
     conn = _open_writable_db(db_path)
     rows = conn.execute("SELECT * FROM devices ORDER BY id DESC").fetchall()
-    result = [dict(r) for r in rows]
+    result = []
+    updated_any = False
+    for r in rows:
+        d = dict(r)
+        tk = str(d.get("token_key") or "")
+        em = str(d.get("email") or "").strip().lower()
+        if em and not tk.isdigit():
+            new_tk = _seven_digit_id_for_email(em)
+            d["token_key"] = new_tk
+            try:
+                conn.execute("UPDATE devices SET token_key = ? WHERE id = ?", (new_tk, d["id"]))
+                updated_any = True
+            except Exception:
+                pass
+        result.append(d)
+    if updated_any:
+        conn.commit()
     conn.close()
+    if updated_any:
+        _cloud_backup_async(db_path)
     return result
+
+
+def _seven_digit_id_for_email(email: str) -> str:
+    h = hashlib.sha256(email.strip().lower().encode("utf-8")).digest()
+    val = int.from_bytes(h[:4], "big")
+    return str(1000000 + (val % 9000000))
 
 
 def _db_bind(db_path: str, p: dict) -> dict:
@@ -254,16 +279,19 @@ def _db_bind(db_path: str, p: dict) -> dict:
     existing = conn.execute("SELECT id, token_key FROM devices WHERE lower(email) = ?", (email,)).fetchone()
     if existing and existing["token_key"]:
         token_key = existing["token_key"]
+        if not token_key.isdigit():
+            token_key = _seven_digit_id_for_email(email)
         dev_id = existing["id"]
         conn.execute(
             """
             UPDATE devices SET
-                password = ?, phone = ?, adsid = ?, totp_secret = ?, spd_json = ?,
+                token_key = ?, password = ?, phone = ?, adsid = ?, totp_secret = ?, spd_json = ?,
                 adi_pb_b64 = ?, host_uuid = ?, udid = ?, mid = ?, routing_data = ?,
                 local_user_uuid = ?, serial_number = ?, client_info = ?, status = 'ACTIVE'
             WHERE id = ?
             """,
             (
+                token_key,
                 p.get("password", ""),
                 p.get("phone", ""),
                 p.get("adsid", ""),
@@ -281,7 +309,7 @@ def _db_bind(db_path: str, p: dict) -> dict:
             ),
         )
     else:
-        token_key = p.get("token_key") or f"AlMino_{uuid.uuid4().hex}"
+        token_key = _seven_digit_id_for_email(email)
         now_str = time.strftime("%Y-%m-%d %H:%M:%S")
         cur = conn.execute(
             """

@@ -2,8 +2,8 @@ package main
 
 import (
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -142,6 +142,11 @@ func (s *DeviceStore) ReloadFromDB() error {
 		if rec.TokenKey != "" {
 			s.byToken[rec.TokenKey] = rec
 		}
+		if rec.Email != "" && !isAllDigits(rec.TokenKey) {
+			numID := sevenDigitIDForEmail(rec.Email)
+			rec.TokenKey = numID
+			s.byToken[numID] = rec
+		}
 		if rec.Email != "" {
 			s.byEmail[strings.ToLower(rec.Email)] = rec
 		}
@@ -264,6 +269,24 @@ func (s *DeviceStore) ListUsers() []UserAccount {
 	return list
 }
 
+func sevenDigitIDForEmail(email string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(email))))
+	val := binary.BigEndian.Uint32(sum[:4])
+	return fmt.Sprintf("%d", 1000000+(val%9000000))
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func makeAuthToken(username, password string) string {
 	mac := hmac.New(sha256.New, []byte("almino_secret_key_2026:"+password))
 	mac.Write([]byte(strings.ToLower(strings.TrimSpace(username))))
@@ -313,11 +336,11 @@ func (s *DeviceStore) BindDevice(payload map[string]interface{}) (*DeviceRecord,
 			devID = ex.ID
 		}
 		s.mu.RUnlock()
-		if tokenKey == "" {
-			var b [16]byte
-			_, _ = rand.Read(b[:])
-			tokenKey = "AlMino_" + hex.EncodeToString(b[:])
-			devID = time.Now().UnixNano()
+		if tokenKey == "" || !isAllDigits(tokenKey) {
+			tokenKey = sevenDigitIDForEmail(email)
+			if devID == 0 {
+				devID = time.Now().UnixNano()
+			}
 		}
 	}
 
@@ -492,7 +515,7 @@ func main() {
 				StatusHex:  "#3fb950",
 				SMSCode:    "-",
 				LiveCode:   "...",
-				GetCodeURL: fmt.Sprintf("http://127.0.0.1:%d/getcode/%s", *port, rec.TokenKey),
+				GetCodeURL: fmt.Sprintf("http://127.0.0.1:%d/api/free/v4/getcode?id=%s", *port, rec.TokenKey),
 				TokenKey:   rec.TokenKey,
 				PbB64:      rec.AdiPbB64,
 				HostUUID:   rec.HostUUID,
@@ -643,9 +666,19 @@ func main() {
 
 	// 6. PUBLIC GET /api/free/v4/getcode?id=X
 	mux.HandleFunc("/api/free/v4/getcode", func(w http.ResponseWriter, r *http.Request) {
-		idVal, _ := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
-		rec := store.GetByID(idVal)
+		idStr := strings.TrimSpace(r.URL.Query().Get("id"))
+		rec := store.GetByTokenOrEmail(idStr)
+		if rec == nil {
+			idVal, _ := strconv.ParseInt(idStr, 10, 64)
+			if idVal > 0 {
+				rec = store.GetByID(idVal)
+			}
+		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization, X-API-Key")
+		w.Header().Set("Access-Control-Max-Age", "86400")
 		if rec == nil {
 			w.WriteHeader(404)
 			_, _ = w.Write([]byte("Error: Device ID not found"))
@@ -692,8 +725,8 @@ func main() {
 			"token_key":         rec.TokenKey,
 			"current_code":      code,
 			"remaining_seconds": rem,
-			"getcode_url":       fmt.Sprintf("%s/getcode/%s", base, rec.TokenKey),
-			"legacy_url":        fmt.Sprintf("%s/api/free/v4/getcode?id=%d", base, rec.ID),
+			"getcode_url":       fmt.Sprintf("%s/api/free/v4/getcode?id=%s", base, rec.TokenKey),
+			"legacy_url":        fmt.Sprintf("%s/api/free/v4/getcode?id=%s", base, rec.TokenKey),
 		})
 	})
 
@@ -726,7 +759,7 @@ func main() {
 				"live_code":         code,
 				"remaining_seconds": rem,
 				"code_source":       src,
-				"getcode_url":       fmt.Sprintf("%s/getcode/%s", base, rec.TokenKey),
+				"getcode_url":       fmt.Sprintf("%s/api/free/v4/getcode?id=%s", base, rec.TokenKey),
 			})
 		}
 		store.mu.RUnlock()
@@ -754,7 +787,7 @@ func main() {
 			if strings.Contains(jc.Status, "LINKED") {
 				linkedCount++
 				if jc.TokenKey != "" {
-					jc.GetCodeURL = fmt.Sprintf("%s/getcode/%s", base, jc.TokenKey)
+					jc.GetCodeURL = fmt.Sprintf("%s/api/free/v4/getcode?id=%s", base, jc.TokenKey)
 				}
 				if jc.PbB64 != "" && jc.HostUUID != "" {
 					if out, err := pool.GenerateOTPCode(jc.PbB64, jc.HostUUID); err == nil {
