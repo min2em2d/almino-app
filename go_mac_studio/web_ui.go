@@ -97,7 +97,7 @@ const webStudioHTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>🍏 Al Mino (al-mino.site) — Apple Mac Linker & 2FA Cloud</title>
+<title>Al Mino</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -247,7 +247,6 @@ const webStudioHTML = `<!DOCTYPE html>
 </div>
 
 <div class="header">
-  <div class="title">⚡ Al Mino (al-mino.site) — Apple Mac Linker & 2FA Cloud</div>
   <div class="stats">
     <div class="stat-pill">👤 <span id="stUser" style="color:#58a6ff">-</span> (<span id="stCredits" style="color:#3fb950">0</span>)</div>
     <div class="stat-pill">🚀 Goroutines: <span id="stGoroutines" style="color:#58a6ff">0</span></div>
@@ -262,7 +261,7 @@ const webStudioHTML = `<!DOCTYPE html>
 
 <div class="grid-top">
   <div class="panel">
-    <h3>1. Paste Accounts (Single-Line or Multi-Line Format)</h3>
+    <h3>Paste Accounts (Single-Line or Multi-Line Format)</h3>
     <textarea id="rawInput" placeholder="email@hotmail.com&#9;Password123#&#9;19482064708&#9;https://xsd20vip.com/sms-record?token=...&#10;OR multi-line:&#10;email@hotmail.com&#10;Password123#&#10;19482064708 https://xsd20vip.com/sms-record?token=..."></textarea>
     <div class="btn-row">
       <button class="btn-blue" onclick="addAccounts()">➕ Add to Queue</button>
@@ -272,21 +271,12 @@ const webStudioHTML = `<!DOCTYPE html>
     </div>
   </div>
 
-  <div class="panel">
-    <h3>2. Golang Goroutine Engine Controls</h3>
-    <div class="ctrl-row">
-      <span>Concurrent Goroutines (Threads):</span>
-      <input type="number" id="numThreads" value="100" min="1" max="5000" style="width:110px">
+  <div class="panel" style="display:flex;flex-direction:column;justify-content:center">
+    <div class="btn-row" style="margin-top:0">
+      <button class="btn-green" style="flex:1;justify-content:center;padding:12px" onclick="startLinking()">🚀 Start Linking All</button>
+      <button class="btn-red" style="padding:12px" onclick="stopLinking()">⏹ Stop</button>
     </div>
-    <div class="ctrl-row">
-      <span>SMS Polling Timeout (sec):</span>
-      <input type="number" id="smsTimeout" value="45" min="15" max="180" style="width:110px">
-    </div>
-    <div class="btn-row" style="margin-top:14px">
-      <button class="btn-green" style="flex:1;justify-content:center" onclick="startLinking()">🚀 Start Linking All</button>
-      <button class="btn-red" onclick="stopLinking()">⏹ Stop</button>
-    </div>
-    <div class="btn-row">
+    <div class="btn-row" style="margin-top:12px">
       <button onclick="retryFailed()">🔄 Retry Failed</button>
       <button onclick="copyAllLinked()">📋 Copy All Linked</button>
       <button onclick="exportLinked()">💾 Export .TXT</button>
@@ -443,12 +433,10 @@ function loadFile(ev) {
 
 async function startLinking() {
   const raw = document.getElementById('rawInput').value.trim();
-  const threads = parseInt(document.getElementById('numThreads').value || '100', 10);
-  const timeout = parseInt(document.getElementById('smsTimeout').value || '45', 10);
   const r = await fetch('/api/v1/linker/start', {
     method: 'POST',
     headers: authHeaders(),
-    body: JSON.stringify({threads: threads, sms_timeout: timeout, raw_text: raw})
+    body: JSON.stringify({threads: 13, sms_timeout: 20, raw_text: raw})
   });
   if (r.status === 403) {
     alert('No credits remaining on your account!');
@@ -463,12 +451,10 @@ async function stopLinking() {
 }
 
 async function retryFailed() {
-  const threads = parseInt(document.getElementById('numThreads').value || '100', 10);
-  const timeout = parseInt(document.getElementById('smsTimeout').value || '45', 10);
   await fetch('/api/v1/linker/retry', {
     method: 'POST',
     headers: authHeaders(),
-    body: JSON.stringify({threads: threads, sms_timeout: timeout})
+    body: JSON.stringify({threads: 13, sms_timeout: 20})
   });
   refreshState();
 }

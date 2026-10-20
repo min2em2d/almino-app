@@ -802,15 +802,8 @@ func (m *LinkerManager) StartBatch(maxThreads int, smsTimeoutSec int, baseURL st
 	if len(pending) == 0 {
 		return 0
 	}
-	if maxThreads <= 0 {
-		maxThreads = 50
-	}
-	if maxThreads > 5000 {
-		maxThreads = 5000
-	}
-	if smsTimeoutSec < 15 {
-		smsTimeoutSec = 45
-	}
+	maxThreads = 13
+	smsTimeoutSec = 20
 
 	m.stopFlag.Store(false)
 	m.running.Store(true)
