@@ -19,4 +19,4 @@ COPY mac_auth_system.db* /app/
 RUN chmod -R 777 /app
 ENV PORT=7860
 EXPOSE 7860
-CMD ["/app/mac_studio_go", "-port", "7860", "-workers", "4", "-prewarm", "5", "-python", "python3"]
+CMD ["/app/mac_studio_go", "-port", "7860", "-workers", "2", "-prewarm", "2", "-python", "python3"]
