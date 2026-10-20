@@ -590,6 +590,7 @@ type AccountJob struct {
 	TokenKey   string `json:"token_key"`
 	PbB64      string `json:"adi_pb_b64,omitempty"`
 	HostUUID   string `json:"host_uuid,omitempty"`
+	OwnerUser  string `json:"owner_user,omitempty"`
 }
 
 func ParseAccountsText(rawText string) []*AccountJob {
@@ -750,15 +751,20 @@ func (m *LinkerManager) AppendLog(msg string) {
 	m.mu.Unlock()
 }
 
-func (m *LinkerManager) AddAccounts(parsed []*AccountJob) int {
+func (m *LinkerManager) AddAccounts(parsed []*AccountJob, ownerUser string) int {
+	if ownerUser == "" {
+		ownerUser = "mina"
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	added := 0
 	for _, acc := range parsed {
+		acc.OwnerUser = ownerUser
 		found := false
 		for _, ex := range m.jobs {
 			if strings.EqualFold(ex.Email, acc.Email) {
 				ex.Password = acc.Password
+				ex.OwnerUser = ownerUser
 				if acc.Phone != "" {
 					ex.Phone = acc.Phone
 				}
@@ -782,12 +788,14 @@ func (m *LinkerManager) AddAccounts(parsed []*AccountJob) int {
 	return added
 }
 
-func (m *LinkerManager) StartBatch(maxThreads int, smsTimeoutSec int, baseURL string) int {
+func (m *LinkerManager) StartBatch(maxThreads int, smsTimeoutSec int, baseURL string, callerUser string, isAdmin bool) int {
 	m.mu.Lock()
 	var pending []*AccountJob
 	for _, j := range m.jobs {
 		if !strings.Contains(j.Status, "LINKED") {
-			pending = append(pending, j)
+			if isAdmin || strings.EqualFold(j.OwnerUser, callerUser) {
+				pending = append(pending, j)
+			}
 		}
 	}
 	m.mu.Unlock()
@@ -847,6 +855,16 @@ func (m *LinkerManager) processSingleAccount(j *AccountJob, smsTimeoutSec int, b
 	password := strings.TrimSpace(j.Password)
 	otpURL := strings.TrimSpace(j.OTPUrl)
 	manualCode := strings.TrimSpace(j.ManualCode)
+	ownerUser := strings.TrimSpace(j.OwnerUser)
+	if ownerUser == "" {
+		ownerUser = "mina"
+	}
+
+	if !m.store.HasCredits(ownerUser) {
+		m.updateJob(j, "❌ No Credits Left", "#f85149")
+		m.AppendLog(fmt.Sprintf("[%s] User '%s' has 0 credits remaining.", email, ownerUser))
+		return
+	}
 
 	sessClient := newInsecureHTTPClient(15 * time.Second)
 	seenCodes := make(map[string]bool)
@@ -1064,11 +1082,13 @@ func (m *LinkerManager) processSingleAccount(j *AccountJob, smsTimeoutSec int, b
 		"serial_number":   dev.SerialNumber,
 		"client_info":     dev.ClientInfo,
 		"server_model":    dev.Model,
+		"owner_user":      ownerUser,
 	})
 	if err != nil {
 		m.updateJob(j, "❌ DB Save Error", "#f85149")
 		return
 	}
+	m.store.DeductCredit(ownerUser)
 
 	getCodeURL := fmt.Sprintf("%s/getcode/%s", strings.TrimRight(baseURL, "/"), rec.TokenKey)
 	m.mu.Lock()

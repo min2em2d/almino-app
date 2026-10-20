@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -13,27 +16,36 @@ import (
 	"time"
 )
 
+type UserAccount struct {
+	Username  string `json:"username"`
+	Password  string `json:"password"`
+	Role      string `json:"role"`
+	Credits   int64  `json:"credits"`
+	CreatedAt string `json:"created_at"`
+}
+
 type DeviceRecord struct {
-	ID            int64  `json:"id"`
-	Email         string `json:"email"`
-	Password      string `json:"password"`
-	Phone         string `json:"phone"`
-	TokenKey      string `json:"token_key"`
-	TOTPSecret    string `json:"totp_secret"`
-	LastCode      string `json:"last_code"`
+	ID            int64   `json:"id"`
+	Email         string  `json:"email"`
+	Password      string  `json:"password"`
+	Phone         string  `json:"phone"`
+	TokenKey      string  `json:"token_key"`
+	TOTPSecret    string  `json:"totp_secret"`
+	LastCode      string  `json:"last_code"`
 	LastCodeAt    float64 `json:"last_code_at"`
-	ADSID         string `json:"adsid"`
-	UDID          string `json:"udid"`
-	SerialNumber  string `json:"serial_number"`
-	ServerModel   string `json:"server_model"`
-	Status        string `json:"status"`
-	CreatedAt     string `json:"created_at"`
-	AdiPbB64      string `json:"adi_pb_b64"`
-	HostUUID      string `json:"host_uuid"`
-	MID           string `json:"mid"`
-	RoutingData   string `json:"routing_data"`
-	LocalUserUUID string `json:"local_user_uuid"`
-	ClientInfo    string `json:"client_info"`
+	ADSID         string  `json:"adsid"`
+	UDID          string  `json:"udid"`
+	SerialNumber  string  `json:"serial_number"`
+	ServerModel   string  `json:"server_model"`
+	Status        string  `json:"status"`
+	CreatedAt     string  `json:"created_at"`
+	AdiPbB64      string  `json:"adi_pb_b64"`
+	HostUUID      string  `json:"host_uuid"`
+	MID           string  `json:"mid"`
+	RoutingData   string  `json:"routing_data"`
+	LocalUserUUID string  `json:"local_user_uuid"`
+	ClientInfo    string  `json:"client_info"`
+	OwnerUser     string  `json:"owner_user"`
 }
 
 type DeviceStore struct {
@@ -44,6 +56,7 @@ type DeviceStore struct {
 	byEmail map[string]*DeviceRecord
 	byID    map[int64]*DeviceRecord
 	ordered []*DeviceRecord
+	users   map[string]*UserAccount
 }
 
 func NewDeviceStore(dbPath string, pool *AdiEnginePool) (*DeviceStore, error) {
@@ -53,6 +66,7 @@ func NewDeviceStore(dbPath string, pool *AdiEnginePool) (*DeviceStore, error) {
 		byToken: make(map[string]*DeviceRecord),
 		byEmail: make(map[string]*DeviceRecord),
 		byID:    make(map[int64]*DeviceRecord),
+		users:   make(map[string]*UserAccount),
 	}
 	if err := s.ReloadFromDB(); err != nil {
 		return nil, err
@@ -65,14 +79,43 @@ func (s *DeviceStore) ReloadFromDB() error {
 	if err != nil {
 		return err
 	}
+	uRows, _ := s.pool.DBUsersLoad(s.dbPath)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.byToken = make(map[string]*DeviceRecord)
 	s.byEmail = make(map[string]*DeviceRecord)
 	s.byID = make(map[int64]*DeviceRecord)
 	s.ordered = nil
+	s.users = make(map[string]*UserAccount)
+
+	for _, u := range uRows {
+		ua := &UserAccount{
+			Username:  strings.ToLower(strings.TrimSpace(getStringField(u, "username"))),
+			Password:  getStringField(u, "password"),
+			Role:      strings.ToUpper(getStringField(u, "role")),
+			Credits:   toInt64(u["credits"]),
+			CreatedAt: getStringField(u, "created_at"),
+		}
+		if ua.Username != "" {
+			s.users[ua.Username] = ua
+		}
+	}
+	if _, ok := s.users["mina"]; !ok {
+		s.users["mina"] = &UserAccount{
+			Username:  "mina",
+			Password:  "mina-vip",
+			Role:      "ADMIN",
+			Credits:   9999999,
+			CreatedAt: time.Now().Format("2006-01-02 15:04:05"),
+		}
+	}
 
 	for _, r := range rows {
+		owner := strings.ToLower(strings.TrimSpace(getStringField(r, "owner_user")))
+		if owner == "" {
+			owner = "mina"
+		}
 		rec := &DeviceRecord{
 			ID:            toInt64(r["id"]),
 			Email:         getStringField(r, "email"),
@@ -93,6 +136,7 @@ func (s *DeviceStore) ReloadFromDB() error {
 			RoutingData:   getStringField(r, "routing_data"),
 			LocalUserUUID: getStringField(r, "local_user_uuid"),
 			ClientInfo:    getStringField(r, "client_info"),
+			OwnerUser:     owner,
 		}
 		if rec.TokenKey != "" {
 			s.byToken[rec.TokenKey] = rec
@@ -108,6 +152,150 @@ func (s *DeviceStore) ReloadFromDB() error {
 	return nil
 }
 
+func (s *DeviceStore) AuthenticateUser(username, password string) *UserAccount {
+	u := strings.ToLower(strings.TrimSpace(username))
+	p := strings.TrimSpace(password)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	acc, ok := s.users[u]
+	if !ok || acc.Password != p {
+		return nil
+	}
+	cp := *acc
+	return &cp
+}
+
+func (s *DeviceStore) GetUser(username string) *UserAccount {
+	u := strings.ToLower(strings.TrimSpace(username))
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	acc, ok := s.users[u]
+	if !ok {
+		return nil
+	}
+	cp := *acc
+	return &cp
+}
+
+func (s *DeviceStore) HasCredits(username string) bool {
+	u := strings.ToLower(strings.TrimSpace(username))
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	acc, ok := s.users[u]
+	if !ok {
+		return false
+	}
+	return acc.Role == "ADMIN" || acc.Credits > 0
+}
+
+func (s *DeviceStore) DeductCredit(username string) {
+	u := strings.ToLower(strings.TrimSpace(username))
+	s.mu.Lock()
+	acc, ok := s.users[u]
+	if !ok || acc.Role == "ADMIN" {
+		s.mu.Unlock()
+		return
+	}
+	if acc.Credits > 0 {
+		acc.Credits--
+	}
+	uMap := map[string]interface{}{
+		"username": acc.Username,
+		"password": acc.Password,
+		"role":     acc.Role,
+		"credits":  acc.Credits,
+	}
+	s.mu.Unlock()
+	_ = s.pool.DBUserUpsert(s.dbPath, uMap)
+}
+
+func (s *DeviceStore) UpsertUser(username, password, role string, credits int64) error {
+	uname := strings.ToLower(strings.TrimSpace(username))
+	if uname == "" || password == "" {
+		return fmt.Errorf("username and password required")
+	}
+	role = strings.ToUpper(strings.TrimSpace(role))
+	if role != "ADMIN" {
+		role = "USER"
+	}
+	err := s.pool.DBUserUpsert(s.dbPath, map[string]interface{}{
+		"username": uname,
+		"password": password,
+		"role":     role,
+		"credits":  credits,
+	})
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.users[uname] = &UserAccount{
+		Username:  uname,
+		Password:  password,
+		Role:      role,
+		Credits:   credits,
+		CreatedAt: time.Now().Format("2006-01-02 15:04:05"),
+	}
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *DeviceStore) DeleteUser(username string) error {
+	uname := strings.ToLower(strings.TrimSpace(username))
+	if uname == "mina" {
+		return fmt.Errorf("cannot delete primary admin")
+	}
+	if err := s.pool.DBUserDelete(s.dbPath, uname); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	delete(s.users, uname)
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *DeviceStore) ListUsers() []UserAccount {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var list []UserAccount
+	for _, u := range s.users {
+		list = append(list, *u)
+	}
+	return list
+}
+
+func makeAuthToken(username, password string) string {
+	mac := hmac.New(sha256.New, []byte("almino_secret_key_2026:"+password))
+	mac.Write([]byte(strings.ToLower(strings.TrimSpace(username))))
+	return strings.ToLower(strings.TrimSpace(username)) + ":" + hex.EncodeToString(mac.Sum(nil))[:32]
+}
+
+func (s *DeviceStore) VerifyRequestUser(r *http.Request) *UserAccount {
+	// Allow localhost desktop GUI requests without token as admin
+	remoteHost := strings.Split(r.RemoteAddr, ":")[0]
+	tok := r.Header.Get("X-Auth-Token")
+	if tok == "" {
+		if c, err := r.Cookie("almino_token"); err == nil {
+			tok = c.Value
+		}
+	}
+	if tok == "" && (remoteHost == "127.0.0.1" || remoteHost == "::1") && r.URL.Path == "/api/v1/devices/bind" {
+		return s.GetUser("mina")
+	}
+	parts := strings.SplitN(tok, ":", 2)
+	if len(parts) != 2 {
+		return nil
+	}
+	u := s.GetUser(parts[0])
+	if u == nil {
+		return nil
+	}
+	expected := makeAuthToken(u.Username, u.Password)
+	if tok != expected {
+		return nil
+	}
+	return u
+}
+
 func (s *DeviceStore) BindDevice(payload map[string]interface{}) (*DeviceRecord, error) {
 	res, err := s.pool.DBBind(s.dbPath, payload)
 	if err != nil {
@@ -116,6 +304,10 @@ func (s *DeviceStore) BindDevice(payload map[string]interface{}) (*DeviceRecord,
 	tokenKey := getStringField(res, "token_key")
 	devID := toInt64(res["id"])
 	email := strings.ToLower(strings.TrimSpace(getStringField(payload, "email")))
+	owner := strings.ToLower(strings.TrimSpace(getStringField(payload, "owner_user")))
+	if owner == "" {
+		owner = "mina"
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -128,6 +320,7 @@ func (s *DeviceStore) BindDevice(payload map[string]interface{}) (*DeviceRecord,
 			TokenKey:  tokenKey,
 			CreatedAt: time.Now().Format("2006-01-02 15:04:05"),
 			Status:    "ACTIVE",
+			OwnerUser: owner,
 		}
 		s.ordered = append([]*DeviceRecord{rec}, s.ordered...)
 	}
@@ -146,6 +339,7 @@ func (s *DeviceStore) BindDevice(payload map[string]interface{}) (*DeviceRecord,
 	rec.SerialNumber = getStringField(payload, "serial_number")
 	rec.ClientInfo = getStringField(payload, "client_info")
 	rec.ServerModel = getStringField(payload, "server_model")
+	rec.OwnerUser = owner
 	if rec.ServerModel == "" {
 		rec.ServerModel = "MacBookPro15,1"
 	}
@@ -208,7 +402,7 @@ func (s *DeviceStore) ResolveLiveCode(rec *DeviceRecord) (code string, rem int, 
 
 func requestBaseURL(r *http.Request) string {
 	scheme := "http"
-	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") || strings.Contains(r.Host, "onrender.com") || strings.Contains(r.Host, "al-mino.site") {
 		scheme = "https"
 	}
 	host := r.Host
@@ -254,7 +448,7 @@ func main() {
 	savedLinkedPath := filepath.Join(baseDir, "linked_mac_accounts.txt")
 
 	fmt.Printf("========================================================================\n")
-	fmt.Printf(" 🚀 Apple Mac Linker Studio & 2FA Server (Golang High-Speed Edition)\n")
+	fmt.Printf(" 🚀 Al Mino (al-mino.site) — Apple Mac Linker & 2FA Cloud (Golang)\n")
 	fmt.Printf("========================================================================\n")
 	fmt.Printf(" [*] Base Directory : %s\n", baseDir)
 	fmt.Printf(" [*] Starting %d parallel ADI Unicorn worker processes...\n", *workers)
@@ -273,7 +467,6 @@ func main() {
 	}
 	linker := NewLinkerManager(pool, store, savedLinkedPath)
 
-	// Populate existing bound Mac accounts into the Linker Manager table on startup
 	store.mu.RLock()
 	loadedCount := 0
 	for _, rec := range store.ordered {
@@ -291,12 +484,13 @@ func main() {
 				TokenKey:   rec.TokenKey,
 				PbB64:      rec.AdiPbB64,
 				HostUUID:   rec.HostUUID,
+				OwnerUser:  rec.OwnerUser,
 			})
 			loadedCount++
 		}
 	}
 	store.mu.RUnlock()
-	linker.AppendLog(fmt.Sprintf("[+] Go Engine Ready! Loaded %d linked MacBook Pro account(s) from mac_auth_system.db.", loadedCount))
+	linker.AppendLog(fmt.Sprintf("[+] Go Engine Ready! Loaded %d linked MacBook Pro account(s) from vault.", loadedCount))
 
 	mux := http.NewServeMux()
 
@@ -310,7 +504,83 @@ func main() {
 		_, _ = w.Write([]byte(webStudioHTML))
 	})
 
-	// 2. GET /api/getcode/{token_key}
+	// 2. Auth Login Endpoint
+	mux.HandleFunc("/api/v1/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		u := store.AuthenticateUser(req.Username, req.Password)
+		if u == nil {
+			writeJSON(w, 401, map[string]interface{}{"ok": false, "error": "Invalid username or password"})
+			return
+		}
+		tok := makeAuthToken(u.Username, u.Password)
+		http.SetCookie(w, &http.Cookie{
+			Name:     "almino_token",
+			Value:    tok,
+			Path:     "/",
+			MaxAge:   86400 * 30,
+			HttpOnly: false,
+		})
+		writeJSON(w, 200, map[string]interface{}{
+			"ok":       true,
+			"token":    tok,
+			"username": u.Username,
+			"role":     u.Role,
+			"credits":  u.Credits,
+		})
+	})
+
+	// 3. Admin Users Management Endpoints
+	mux.HandleFunc("/api/v1/admin/users", func(w http.ResponseWriter, r *http.Request) {
+		u := store.VerifyRequestUser(r)
+		if u == nil || u.Role != "ADMIN" {
+			writeJSON(w, 403, map[string]interface{}{"error": "Admin access required"})
+			return
+		}
+		writeJSON(w, 200, map[string]interface{}{"ok": true, "users": store.ListUsers()})
+	})
+
+	mux.HandleFunc("/api/v1/admin/users/upsert", func(w http.ResponseWriter, r *http.Request) {
+		u := store.VerifyRequestUser(r)
+		if u == nil || u.Role != "ADMIN" {
+			writeJSON(w, 403, map[string]interface{}{"error": "Admin access required"})
+			return
+		}
+		var req struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+			Role     string `json:"role"`
+			Credits  int64  `json:"credits"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := store.UpsertUser(req.Username, req.Password, req.Role, req.Credits); err != nil {
+			writeJSON(w, 400, map[string]interface{}{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]interface{}{"ok": true, "users": store.ListUsers()})
+	})
+
+	mux.HandleFunc("/api/v1/admin/users/delete", func(w http.ResponseWriter, r *http.Request) {
+		u := store.VerifyRequestUser(r)
+		if u == nil || u.Role != "ADMIN" {
+			writeJSON(w, 403, map[string]interface{}{"error": "Admin access required"})
+			return
+		}
+		var req struct {
+			Username string `json:"username"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := store.DeleteUser(req.Username); err != nil {
+			writeJSON(w, 400, map[string]interface{}{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]interface{}{"ok": true, "users": store.ListUsers()})
+	})
+
+	// 4. PUBLIC GET /api/getcode/{token_key}
 	mux.HandleFunc("/api/getcode/", func(w http.ResponseWriter, r *http.Request) {
 		tok := strings.TrimPrefix(r.URL.Path, "/api/getcode/")
 		rec := store.GetByTokenOrEmail(tok)
@@ -332,7 +602,7 @@ func main() {
 		})
 	})
 
-	// 3. GET /getcode/{token_key}
+	// 5. PUBLIC GET /getcode/{token_key}
 	mux.HandleFunc("/getcode/", func(w http.ResponseWriter, r *http.Request) {
 		tok := strings.TrimPrefix(r.URL.Path, "/getcode/")
 		rec := store.GetByTokenOrEmail(tok)
@@ -359,7 +629,7 @@ func main() {
 		_, _ = w.Write([]byte(renderGetCodeHTML(rec, code, rem, src)))
 	})
 
-	// 4. GET /api/free/v4/getcode?id=X
+	// 6. PUBLIC GET /api/free/v4/getcode?id=X
 	mux.HandleFunc("/api/free/v4/getcode", func(w http.ResponseWriter, r *http.Request) {
 		idVal, _ := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
 		rec := store.GetByID(idVal)
@@ -377,16 +647,24 @@ func main() {
 		}
 	})
 
-	// 5. POST /api/v1/devices/bind & GET /api/v1/devices
+	// 7. POST /api/v1/devices/bind & GET /api/v1/devices
 	mux.HandleFunc("/api/v1/devices/bind", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			writeJSON(w, 405, map[string]string{"error": "Method not allowed"})
+			return
+		}
+		u := store.VerifyRequestUser(r)
+		if u == nil {
+			writeJSON(w, 401, map[string]string{"error": "Authentication required"})
 			return
 		}
 		var payload map[string]interface{}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			writeJSON(w, 400, map[string]string{"error": err.Error()})
 			return
+		}
+		if payload["owner_user"] == nil || payload["owner_user"] == "" {
+			payload["owner_user"] = u.Username
 		}
 		rec, err := store.BindDevice(payload)
 		if err != nil {
@@ -407,11 +685,23 @@ func main() {
 		})
 	})
 
+	mux.HandleFunc("/api/v1/ping", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]interface{}{"status": "online"})
+	})
+
 	mux.HandleFunc("/api/v1/devices", func(w http.ResponseWriter, r *http.Request) {
+		u := store.VerifyRequestUser(r)
+		if u == nil {
+			writeJSON(w, 401, map[string]string{"error": "Authentication required"})
+			return
+		}
 		base := requestBaseURL(r)
 		store.mu.RLock()
 		list := make([]map[string]interface{}, 0, len(store.ordered))
 		for i, rec := range store.ordered {
+			if u.Role != "ADMIN" && !strings.EqualFold(rec.OwnerUser, u.Username) {
+				continue
+			}
 			if i >= 200 {
 				break
 			}
@@ -431,14 +721,23 @@ func main() {
 		writeJSON(w, 200, map[string]interface{}{"devices": list})
 	})
 
-	// 6. Web Linker Studio API Endpoints
+	// 8. Protected Web Linker Studio API Endpoints
 	mux.HandleFunc("/api/v1/linker/state", func(w http.ResponseWriter, r *http.Request) {
+		u := store.VerifyRequestUser(r)
+		if u == nil {
+			writeJSON(w, 401, map[string]interface{}{"error": "Unauthorized"})
+			return
+		}
 		base := requestBaseURL(r)
+		isAdmin := (u.Role == "ADMIN")
 		linker.mu.RLock()
 		jobsCopy := make([]AccountJob, 0, len(linker.jobs))
 		linkedCount := 0
 		failedCount := 0
 		for _, j := range linker.jobs {
+			if !isAdmin && !strings.EqualFold(j.OwnerUser, u.Username) {
+				continue
+			}
 			jc := *j
 			if strings.Contains(jc.Status, "LINKED") {
 				linkedCount++
@@ -453,13 +752,16 @@ func main() {
 			} else if strings.Contains(jc.Status, "❌") {
 				failedCount++
 			}
-			jc.PbB64 = "" // keep payload light
+			jc.PbB64 = ""
 			jobsCopy = append(jobsCopy, jc)
 		}
 		logsCopy := append([]string(nil), linker.logs...)
 		linker.mu.RUnlock()
 
 		writeJSON(w, 200, map[string]interface{}{
+			"user":              u.Username,
+			"role":              u.Role,
+			"credits":           u.Credits,
 			"running":           linker.running.Load(),
 			"active_goroutines": linker.activeGorouts.Load(),
 			"prewarmed_macs":    len(pool.macPool),
@@ -472,17 +774,31 @@ func main() {
 	})
 
 	mux.HandleFunc("/api/v1/linker/add", func(w http.ResponseWriter, r *http.Request) {
+		u := store.VerifyRequestUser(r)
+		if u == nil {
+			writeJSON(w, 401, map[string]interface{}{"error": "Unauthorized"})
+			return
+		}
 		var req struct {
 			RawText string `json:"raw_text"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		parsed := ParseAccountsText(req.RawText)
-		added := linker.AddAccounts(parsed)
-		linker.AppendLog(fmt.Sprintf("[+] Added %d account(s) to queue (parsed %d lines).", added, len(parsed)))
+		added := linker.AddAccounts(parsed, u.Username)
+		linker.AppendLog(fmt.Sprintf("[+] [%s] Added %d account(s) to queue.", u.Username, added))
 		writeJSON(w, 200, map[string]interface{}{"ok": true, "parsed": len(parsed), "added": added})
 	})
 
 	mux.HandleFunc("/api/v1/linker/start", func(w http.ResponseWriter, r *http.Request) {
+		u := store.VerifyRequestUser(r)
+		if u == nil {
+			writeJSON(w, 401, map[string]interface{}{"error": "Unauthorized"})
+			return
+		}
+		if !store.HasCredits(u.Username) {
+			writeJSON(w, 403, map[string]interface{}{"ok": false, "error": "No credits remaining"})
+			return
+		}
 		var req struct {
 			Threads    int    `json:"threads"`
 			SMSTimeout int    `json:"sms_timeout"`
@@ -491,28 +807,39 @@ func main() {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		if strings.TrimSpace(req.RawText) != "" {
 			parsed := ParseAccountsText(req.RawText)
-			linker.AddAccounts(parsed)
+			linker.AddAccounts(parsed, u.Username)
 		}
-		count := linker.StartBatch(req.Threads, req.SMSTimeout, requestBaseURL(r))
+		count := linker.StartBatch(req.Threads, req.SMSTimeout, requestBaseURL(r), u.Username, u.Role == "ADMIN")
 		writeJSON(w, 200, map[string]interface{}{"ok": true, "started": count})
 	})
 
 	mux.HandleFunc("/api/v1/linker/stop", func(w http.ResponseWriter, r *http.Request) {
+		u := store.VerifyRequestUser(r)
+		if u == nil {
+			writeJSON(w, 401, map[string]interface{}{"error": "Unauthorized"})
+			return
+		}
 		linker.stopFlag.Store(true)
-		linker.AppendLog("[!] Stop signal sent to all active Goroutines...")
+		linker.AppendLog(fmt.Sprintf("[!] [%s] Stop signal sent to active Goroutines...", u.Username))
 		writeJSON(w, 200, map[string]interface{}{"ok": true})
 	})
 
 	mux.HandleFunc("/api/v1/linker/retry", func(w http.ResponseWriter, r *http.Request) {
+		u := store.VerifyRequestUser(r)
+		if u == nil {
+			writeJSON(w, 401, map[string]interface{}{"error": "Unauthorized"})
+			return
+		}
 		var req struct {
 			Threads    int `json:"threads"`
 			SMSTimeout int `json:"sms_timeout"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		isAdmin := (u.Role == "ADMIN")
 		linker.mu.Lock()
 		retried := 0
 		for _, j := range linker.jobs {
-			if strings.Contains(j.Status, "❌") {
+			if (isAdmin || strings.EqualFold(j.OwnerUser, u.Username)) && strings.Contains(j.Status, "❌") {
 				j.Status = "Pending"
 				j.StatusHex = "#e6edf3"
 				retried++
@@ -520,16 +847,32 @@ func main() {
 		}
 		linker.mu.Unlock()
 		if retried > 0 {
-			linker.StartBatch(req.Threads, req.SMSTimeout, requestBaseURL(r))
+			linker.StartBatch(req.Threads, req.SMSTimeout, requestBaseURL(r), u.Username, isAdmin)
 		}
 		writeJSON(w, 200, map[string]interface{}{"ok": true, "retried": retried})
 	})
 
 	mux.HandleFunc("/api/v1/linker/clear", func(w http.ResponseWriter, r *http.Request) {
+		u := store.VerifyRequestUser(r)
+		if u == nil {
+			writeJSON(w, 401, map[string]interface{}{"error": "Unauthorized"})
+			return
+		}
+		isAdmin := (u.Role == "ADMIN")
 		linker.mu.Lock()
-		linker.jobs = nil
+		if isAdmin {
+			linker.jobs = nil
+		} else {
+			var kept []*AccountJob
+			for _, j := range linker.jobs {
+				if !strings.EqualFold(j.OwnerUser, u.Username) {
+					kept = append(kept, j)
+				}
+			}
+			linker.jobs = kept
+		}
 		linker.mu.Unlock()
-		linker.AppendLog("[*] Cleared table.")
+		linker.AppendLog(fmt.Sprintf("[*] [%s] Cleared table.", u.Username))
 		writeJSON(w, 200, map[string]interface{}{"ok": true})
 	})
 
@@ -537,7 +880,6 @@ func main() {
 	fmt.Printf(" [+] Server listening on http://127.0.0.1:%d (and all network interfaces)\n", *port)
 	fmt.Printf("========================================================================\n")
 
-	// Background Keep-Alive Goroutine so cloud instance stays warm 24/7
 	go func() {
 		client := &http.Client{Timeout: 10 * time.Second}
 		for {
@@ -546,7 +888,7 @@ func main() {
 			if extURL == "" {
 				extURL = "https://almino-app.onrender.com"
 			}
-			_, _ = client.Get(strings.TrimRight(extURL, "/") + "/api/v1/devices")
+			_, _ = client.Get(strings.TrimRight(extURL, "/") + "/api/v1/ping")
 		}
 	}()
 

@@ -331,3 +331,36 @@ func (p *AdiEnginePool) DBBind(dbPath string, payload map[string]interface{}) (m
 	}
 	return res, nil
 }
+
+func (p *AdiEnginePool) DBUsersLoad(dbPath string) ([]map[string]interface{}, error) {
+	raw, err := p.pickWorker().call(map[string]interface{}{
+		"cmd":     "db_users_load",
+		"db_path": dbPath,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var rows []map[string]interface{}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func (p *AdiEnginePool) DBUserUpsert(dbPath string, user map[string]interface{}) error {
+	_, err := p.pickWorker().call(map[string]interface{}{
+		"cmd":     "db_user_upsert",
+		"db_path": dbPath,
+		"user":    user,
+	})
+	return err
+}
+
+func (p *AdiEnginePool) DBUserDelete(dbPath string, username string) error {
+	_, err := p.pickWorker().call(map[string]interface{}{
+		"cmd":      "db_user_delete",
+		"db_path":  dbPath,
+		"username": username,
+	})
+	return err
+}

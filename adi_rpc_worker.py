@@ -54,6 +54,10 @@ def _cloud_restore_if_needed(db_path: str):
                 _ensure_db_schema(conn)
                 conn.execute("ATTACH DATABASE ? AS rem", (remote_db,))
                 conn.execute("INSERT OR IGNORE INTO main.devices SELECT * FROM rem.devices")
+                try:
+                    conn.execute("INSERT OR REPLACE INTO main.users SELECT * FROM rem.users")
+                except Exception:
+                    pass
                 conn.commit()
                 conn.execute("DETACH DATABASE rem")
                 conn.close()
@@ -110,13 +114,85 @@ def _ensure_db_schema(conn: sqlite3.Connection):
             mid TEXT,
             routing_data TEXT,
             local_user_uuid TEXT,
-            client_info TEXT
+            client_info TEXT,
+            owner_user TEXT DEFAULT 'mina'
         )
         """
+    )
+    try:
+        conn.execute("ALTER TABLE devices ADD COLUMN owner_user TEXT DEFAULT 'mina';")
+    except Exception:
+        pass
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            username TEXT PRIMARY KEY,
+            password TEXT NOT NULL,
+            role TEXT DEFAULT 'USER',
+            credits INTEGER DEFAULT 0,
+            created_at TEXT
+        )
+        """
+    )
+    default_admin_user = os.environ.get("ADMIN_USER", "mina").strip().lower()
+    default_admin_pass = os.environ.get("ADMIN_PASS", "mina-vip").strip()
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO users (username, password, role, credits, created_at)
+        VALUES (?, ?, 'ADMIN', 9999999, ?)
+        """,
+        (default_admin_user, default_admin_pass, time.strftime("%Y-%m-%d %H:%M:%S")),
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_devices_token ON devices(token_key);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_devices_email ON devices(email);")
     conn.commit()
+
+
+def _db_users_load(db_path: str) -> list:
+    _cloud_restore_if_needed(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
+    conn.row_factory = sqlite3.Row
+    _ensure_db_schema(conn)
+    rows = conn.execute("SELECT * FROM users ORDER BY role ASC, username ASC").fetchall()
+    result = [dict(r) for r in rows]
+    conn.close()
+    return result
+
+
+def _db_user_upsert(db_path: str, u: dict) -> dict:
+    conn = sqlite3.connect(db_path, timeout=30)
+    _ensure_db_schema(conn)
+    uname = (u.get("username") or "").strip().lower()
+    upass = (u.get("password") or "").strip()
+    role = (u.get("role") or "USER").strip().upper()
+    credits = int(u.get("credits", 0))
+    now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        """
+        INSERT INTO users (username, password, role, credits, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(username) DO UPDATE SET
+            password = excluded.password,
+            role = excluded.role,
+            credits = excluded.credits
+        """,
+        (uname, upass, role, credits, now_str),
+    )
+    conn.commit()
+    conn.close()
+    _cloud_backup_async(db_path)
+    return {"username": uname, "role": role, "credits": credits}
+
+
+def _db_user_delete(db_path: str, username: str) -> dict:
+    conn = sqlite3.connect(db_path, timeout=30)
+    _ensure_db_schema(conn)
+    uname = username.strip().lower()
+    conn.execute("DELETE FROM users WHERE lower(username) = ? AND role != 'ADMIN'", (uname,))
+    conn.commit()
+    conn.close()
+    _cloud_backup_async(db_path)
+    return {"deleted": uname}
 
 
 def _db_load_all(db_path: str) -> list:
@@ -175,8 +251,8 @@ def _db_bind(db_path: str, p: dict) -> dict:
             INSERT INTO devices (
                 email, password, phone, token_key, totp_secret, adsid, udid,
                 serial_number, server_model, spd_json, status, created_at,
-                adi_pb_b64, host_uuid, mid, routing_data, local_user_uuid, client_info
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?)
+                adi_pb_b64, host_uuid, mid, routing_data, local_user_uuid, client_info, owner_user
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 email,
@@ -196,6 +272,7 @@ def _db_bind(db_path: str, p: dict) -> dict:
                 p.get("routing_data", "17106176"),
                 p.get("local_user_uuid", ""),
                 p.get("client_info", ""),
+                p.get("owner_user") or "mina",
             ),
         )
         dev_id = cur.lastrowid
@@ -283,6 +360,18 @@ def main():
 
             elif cmd == "db_bind":
                 out = _db_bind(req["db_path"], req["payload"])
+                res = {"ok": True, "id": req_id, "data": out}
+
+            elif cmd == "db_users_load":
+                rows = _db_users_load(req["db_path"])
+                res = {"ok": True, "id": req_id, "data": rows}
+
+            elif cmd == "db_user_upsert":
+                out = _db_user_upsert(req["db_path"], req["user"])
+                res = {"ok": True, "id": req_id, "data": out}
+
+            elif cmd == "db_user_delete":
+                out = _db_user_delete(req["db_path"], req["username"])
                 res = {"ok": True, "id": req_id, "data": out}
 
             else:
