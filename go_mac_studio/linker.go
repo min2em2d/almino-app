@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -23,6 +24,7 @@ import (
 const (
 	DefaultClientInfo = "<MacBookPro15,1> <Mac OS X;10.15.7;19H15> <com.apple.AOSKit/282 (com.apple.dt.Xcode/3594.4.19)>"
 	DefaultUserAgent  = "Xcode"
+	DefaultProxyURL   = "http://c41a84cfc4bc235ad100:cbc01a42da027597@gw.dataimpulse.com:823"
 )
 
 type GSAProfile struct {
@@ -49,13 +51,35 @@ var gsaProfiles = []GSAProfile{
 	},
 }
 
+var directFallbackClient = &http.Client{
+	Transport: &http.Transport{
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+		MaxIdleConns:        500,
+		MaxIdleConnsPerHost: 200,
+		IdleConnTimeout:     30 * time.Second,
+	},
+	Timeout: 15 * time.Second,
+}
+
 func newInsecureHTTPClient(timeout time.Duration) *http.Client {
 	jar, _ := cookiejar.New(nil)
+	proxyStr := strings.TrimSpace(os.Getenv("ALMINO_PROXY"))
+	if proxyStr == "" {
+		proxyStr = DefaultProxyURL
+	}
+	parsedProxy, _ := url.Parse(proxyStr)
+
 	tr := &http.Transport{
 		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
 		MaxIdleConns:        2000,
 		MaxIdleConnsPerHost: 500,
 		IdleConnTimeout:     30 * time.Second,
+		Proxy: func(req *http.Request) (*url.URL, error) {
+			if parsedProxy != nil && strings.HasSuffix(strings.ToLower(req.URL.Hostname()), "apple.com") {
+				return parsedProxy, nil
+			}
+			return nil, nil
+		},
 	}
 	return &http.Client{
 		Transport: tr,
@@ -171,7 +195,20 @@ func gsaPost(pool *AdiEnginePool, client *http.Client, params map[string]interfa
 		}
 	}
 
-	resp, err := client.Do(req)
+	var resp *http.Response
+	for attempt := 0; attempt < 2; attempt++ {
+		rClone, _ := http.NewRequest("POST", "https://gsa.apple.com/grandslam/GsService2", bytes.NewReader(xmlBytes))
+		rClone.Header = req.Header.Clone()
+		resp, err = client.Do(rClone)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		rDirect, _ := http.NewRequest("POST", "https://gsa.apple.com/grandslam/GsService2", bytes.NewReader(xmlBytes))
+		rDirect.Header = req.Header.Clone()
+		resp, err = directFallbackClient.Do(rDirect)
+	}
 	if err != nil {
 		return map[string]interface{}{"Status": map[string]interface{}{"hsc": int64(500), "em": err.Error()}}, cpd
 	}
